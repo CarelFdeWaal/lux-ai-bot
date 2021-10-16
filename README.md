@@ -20,3 +20,7 @@ https://github.com/Lux-AI-Challenge/Lux-Design-2021/tree/master/kits/python
 
 ## View the game in viewer:
 1. Upload replay JSON file to https://2021vis.lux-ai.org/ 
+
+## Modify the bot
+
+You only need to edit the agent.py file all logic resides there
