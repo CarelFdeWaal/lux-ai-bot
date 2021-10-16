@@ -24,3 +24,9 @@ https://github.com/Lux-AI-Challenge/Lux-Design-2021/tree/master/kits/python
 ## Modify the bot
 
 You only need to edit the agent.py file all logic resides there
+
+
+## Other
+
+Want to try this to compare bots:
+https://www.kaggle.com/huikang/lux-ai-agent-evaluation
