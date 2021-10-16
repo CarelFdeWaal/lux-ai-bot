@@ -7,12 +7,14 @@ from lux.game_constants import GAME_CONSTANTS
 from collections import deque
 import random
 from lux import annotate
-from helpers import PiorityData
-# logfile = "agent.log"
-# open(logfile,"w")
+from helpers import PriorityCell, PiorityData
+from scipy.ndimage import measurements
+import numpy as np
+logfile = "agent.log"
+open(logfile,"w")
 
-# p_logfile = "priority.log"
-# open(p_logfile,"w")
+p_logfile = "priority.log"
+open(p_logfile,"w")
 
 #hyper params
 FUEL_IN_CITY_BEFORE_LEAVING = 320
@@ -20,6 +22,7 @@ RESOURCE_MIN = 50
 EXPLORE_AGRO = 2
 FUEL_MISSMATCH = 500
 START_EXPLORE_STEP = 5
+STEP_TO_START_LOOKING_FOR_LARGER_CLUSTER = 20
 
 DIRECTIONS = Constants.DIRECTIONS
 game_state: Game = None
@@ -29,17 +32,15 @@ build_location = None
 
 unit_to_priority_tile_dict = {}
 worker_positions = {}
-priority_build_tiles: List[Cell] = []
+priority_build_tiles: List[PriorityCell] = []
 
-def mylog(msg):
-    False
-    # with open(logfile,"a") as f:
-    #     f.write(msg+"\n")
+def log(msg):
+    with open(logfile,"a") as f:
+        f.write(msg+"\n")
 
-def plog(msg):
-    False
-    # with open(p_logfile,"a") as f:
-    #     f.write(msg+"\n")
+def priority_log(msg):
+    with open(p_logfile,"a") as f:
+        f.write(msg+"\n")
 
 def have_unresearched_resources(cell: Cell, player: Player):
     if cell.resource.type == Constants.RESOURCE_TYPES.COAL and not player.researched_coal(): return True
@@ -61,11 +62,19 @@ def surrounding_cell_has_resources(cell: Cell, player: Player):
 
 def get_resource_tiles(game_state, width, height):
     resource_tiles: list[Cell] = []
+    resource_matrix = np.zeros((width, height), int)
     for y in range(height):
         for x in range(width):
             cell: Cell = game_state.map.get_cell(x, y)
             if cell.has_resource() and cell.resource.amount > RESOURCE_MIN:
                 resource_tiles.append(cell)
+                resource_matrix[cell.pos.x, cell.pos.y] = 1
+
+    cluster_labels, num = measurements.label(resource_matrix)
+    for t in resource_tiles:
+        label = cluster_labels[t.pos.x, t.pos.y]
+        cluster_size =  np.count_nonzero(cluster_labels == label)
+        t.resource.cluster_size = cluster_size
     return resource_tiles
 
 def get_surronding_cells(current_cell: Cell) -> List[Cell]:
@@ -91,15 +100,15 @@ def has_units(cell: Cell, workers: List[Unit]):
         if worker.pos == cell.pos:
             return True
     return False
-    
-def get_priority_tiles(resource_tiles: List[Cell], player: Player, workers: List[Unit]):
-    priority_list = []
-    for resource_tile in resource_tiles:
-        current_cell = game_state.map.get_cell(resource_tile.pos.x, resource_tile.pos.y)
+
+def get_priority_tiles(resource_tiles: List[Cell], player: Player, workers: List[Unit]) -> List[PriorityCell]:
+    priority_list: List[PriorityCell] = []
+    for current_cell in resource_tiles:
+        # current_cell = game_state.map.get_cell(resource_tile.pos.x, resource_tile.pos.y)
         if current_cell.has_resource() == True and have_unresearched_resources(current_cell, player) == False and current_cell.resource.amount > 100:
             for cell in get_surronding_cells(current_cell):
                 if cell.has_resource() == False and ( cell.citytile == None or cell.citytile == False) and has_units(cell, workers) == False:
-                    priority_list.append(cell) 
+                    priority_list.append(PriorityCell(cell, current_cell.resource)) 
     return priority_list
 
 def get_close_city(player, unit):
@@ -119,18 +128,19 @@ def find_empty_tile_near(near_what: Cell, game_state, observation):
     # may later need to try: dirs = [(1,-1), (-1,1), (-1,-1), (1,1)] too.
     for d in dirs:
         try:
-            possible_empty_tile = game_state.map.get_cell(near_what.pos.x+d[0], near_what.pos.y+d[1])
+            possible_empty_tile: Cell = game_state.map.get_cell(near_what.pos.x+d[0], near_what.pos.y+d[1])
+            in_priority_list = next((x for x in priority_build_tiles if x.cell.pos == possible_empty_tile.pos), False)
             #logging.INFO(f"{observation['step']}: Checking:{possible_empty_tile.pos}")
-            if possible_empty_tile in priority_build_tiles and possible_empty_tile.resource == None and possible_empty_tile.road == 0 and possible_empty_tile.citytile == None:
+            if in_priority_list == True and possible_empty_tile.resource == None and possible_empty_tile.road == 0 and possible_empty_tile.citytile == None:
                 build_location = possible_empty_tile
-                mylog(f"{observation['step']}: Found build location:{build_location.pos}")
+                log(f"{observation['step']}: Found build location:{build_location.pos}")
 
                 return build_location
         except Exception as e:
-            mylog(f"{observation['step']}: While searching for empty tiles:{str(e)}")
+            log(f"{observation['step']}: While searching for empty tiles:{str(e)}")
 
 
-    mylog(f"{observation['step']}: Couldn't find a tile next to, checking diagonals instead..")
+    log(f"{observation['step']}: Couldn't find a tile next to, checking diagonals instead..")
 
     dirs = [(1,-1), (-1,1), (-1,-1), (1,1)] 
     # may later need to try: dirs = [(1,-1), (-1,1), (-1,-1), (1,1)] too.
@@ -140,22 +150,31 @@ def find_empty_tile_near(near_what: Cell, game_state, observation):
             #logging.INFO(f"{observation['step']}: Checking:{possible_empty_tile.pos}")
             if possible_empty_tile.resource == None and possible_empty_tile.road == 0 and possible_empty_tile.citytile == None:
                 build_location = possible_empty_tile
-                mylog(f"{observation['step']}: Found build location:{build_location.pos}")
+                log(f"{observation['step']}: Found build location:{build_location.pos}")
 
                 return build_location
         except Exception as e:
-            mylog(f"{observation['step']}: While searching for empty tiles:{str(e)}")
+            log(f"{observation['step']}: While searching for empty tiles:{str(e)}")
 
-    mylog(f"{observation['step']}: Something likely went wrong, couldn't find any empty tile")
+    log(f"{observation['step']}: Something likely went wrong, couldn't find any empty tile")
     return None
 
 def find_closest_unused_priority_cell(unit: Unit, observation):
-    pbt_with_dist_dict = {}
-    for tile in priority_build_tiles:
-        dist = unit.pos.distance_to(tile.pos)
-        pbt_with_dist_dict[f"{tile.pos.x},{tile.pos.y}"] = dist
 
-    pbt_with_dist_dict = {k: v for k, v in sorted(pbt_with_dist_dict.items(), key=lambda item: item[1])}
+    if observation['step'] > STEP_TO_START_LOOKING_FOR_LARGER_CLUSTER and random.randint(0,2) == 1:
+        find_largest_cluster_unused_priority_cell(unit, observation)
+
+    pbt_with_dist_dict = {}
+    for p_cell in priority_build_tiles:
+        tile = p_cell.cell
+        dist = unit.pos.distance_to(tile.pos)
+        pbt_with_dist_dict[f"{tile.pos.x},{tile.pos.y}"] = PiorityData(p_cell, dist)
+
+    pbt_with_dist_dict = {k: v for k, v in sorted(pbt_with_dist_dict.items(), key=lambda item: item[1].distance)}
+    # priority_str = f""
+    # for t in pbt_with_dist_dict.items():
+    #     priority_str += f"{t[1].p_cell.resource.cluster_size},{t[1].distance}\n"
+    # priority_log(f"{observation['step']} - priority list: {priority_str}")
     for pos_str in pbt_with_dist_dict:
         if random.randint(0,EXPLORE_AGRO) == 1 or observation['step'] < START_EXPLORE_STEP:
             pos_l = pos_str.split(",")
@@ -165,7 +184,30 @@ def find_closest_unused_priority_cell(unit: Unit, observation):
         else:
             continue
     
-    mylog(f"{observation['step']}: Something likely went wrong, couldn't find any empty tile")
+    log(f"{observation['step']}: Something likely went wrong, couldn't find any empty tile")
+    return None
+
+def find_largest_cluster_unused_priority_cell(unit: Unit, observation):
+    pbt_with_dist_dict = {}
+    for p_cell in priority_build_tiles:
+        tile = p_cell.cell
+        dist = unit.pos.distance_to(tile.pos)
+        pbt_with_dist_dict[f"{tile.pos.x},{tile.pos.y}"] = PiorityData(p_cell, dist)
+
+    pbt_with_dist_dict = {k: v for k, v in sorted(pbt_with_dist_dict.items(), \
+        key=lambda item: (-item[1].p_cell.resource.cluster_size, item[1].distance))}
+    priority_str = f""
+    for t in pbt_with_dist_dict.items():
+        priority_str += f"{t[1].p_cell.resource.cluster_size},{t[1].distance}\n"
+    priority_log(f"{observation['step']} - priority list: {priority_str}")
+    for pos_str in pbt_with_dist_dict:
+        pos_l = pos_str.split(",")
+        possible_build_location = game_state.map.get_cell(int(pos_l[0]), int(pos_l[1]))
+        if possible_build_location.resource == None and possible_build_location.road == 0 and possible_build_location.citytile == None:
+            return possible_build_location
+
+    
+    log(f"{observation['step']}: Something likely went wrong, couldn't find any empty tile")
     return None
     
 
@@ -174,7 +216,7 @@ def add_move_to_direction(unit: Unit, new_pos: Position, move_list: List[Positio
     new_pos = unit.pos.translate(direct,1)
     if new_pos in move_list:
         ran_dir = random.choice(Constants.DIRECTIONS)
-        mylog(f"Move in random direction: {ran_dir}")
+        log(f"Move in random direction: {ran_dir}")
         ran_pos = unit.pos.translate(direct,1)
         move_list.append(ran_pos)
         return unit.move(ran_dir), move_list
@@ -201,8 +243,8 @@ def agent(observation, configuration):
         game_state._update(observation["updates"])
     
     actions = []
+    ###
 
-    ### AI Code goes down here! ### 
     player = game_state.players[observation.player]
     opponent = game_state.players[(observation.player + 1) % 2]
     width, height = game_state.map.width, game_state.map.height
@@ -210,10 +252,8 @@ def agent(observation, configuration):
     workers = [u for u in player.units if u.is_worker()]
     carts = [u for u in player.units if u.is_cart()]
     priority_build_tiles = get_priority_tiles(resource_tiles, player, workers) 
-
     cities: List[City] = player.cities.values()
     city_tiles: List[CityTile] = []
-
     for city in cities:
         for c_tile in city.citytiles:
             city_tiles.append(c_tile)
@@ -223,7 +263,6 @@ def agent(observation, configuration):
     # fuel_missmatch = city_w_highest_fuel.fuel - city_w_lowest_fuel.fuel
 
     for w in workers:
-
         if w.id in worker_positions:
             worker_positions[w.id].append((w.pos.x, w.pos.y))
         else:
@@ -231,7 +270,7 @@ def agent(observation, configuration):
             worker_positions[w.id].append((w.pos.x, w.pos.y))
 
 
-    mylog(f"{observation['step']} Worker Positions {worker_positions}")
+    log(f"{observation['step']} Worker Positions {worker_positions}")
 
     if len(workers) == 1 and len(city_tiles) == 1 and observation['step'] < 3:
         worker = workers[0]
@@ -239,7 +278,7 @@ def agent(observation, configuration):
     else:
         for w in workers:
             if w.id not in unit_to_priority_tile_dict:
-                mylog(f"{observation['step']} Found worker w/o resource {w.id}")
+                log(f"{observation['step']} Found worker w/o resource {w.id}")
                 tile_assignment = find_closest_unused_priority_cell(w, observation)
                 unit_to_priority_tile_dict[w.id] = tile_assignment
 
@@ -263,21 +302,21 @@ def agent(observation, configuration):
                     min_fuel = FUEL_IN_CITY_BEFORE_LEAVING
                     if game_state.map_width < 32: min_fuel = FUEL_IN_CITY_BEFORE_LEAVING/2
                     if cell.pos == unit_cell.pos and has_surrounding_res and unit_city != None and unit_city.fuel < min_fuel:
-                        plog(f"{player.team} - {observation['step']} - Stay put. x: {cell.pos.x}, y: {cell.pos.y}")
+                        priority_log(f"{player.team} - {observation['step']} - Stay put. x: {cell.pos.x}, y: {cell.pos.y}")
                         continue
                     elif cell.pos == unit_cell.pos and has_surrounding_res and unit_city != None and unit_city.fuel > min_fuel:
-                        plog(f"{player.team} - {observation['step']} - Re-assign. x: {cell.pos.x}, y: {cell.pos.y}")
+                        priority_log(f"{player.team} - {observation['step']} - Re-assign. x: {cell.pos.x}, y: {cell.pos.y}")
                         new_tile = find_closest_unused_priority_cell(unit, observation)
                         unit_to_priority_tile_dict[unit.id] = new_tile
                         move_command, move_list = add_move_to_direction(unit,new_tile.pos, move_list)
                         actions.append(move_command)
                         continue
                     elif cell.pos == unit_cell.pos and not has_surrounding_res:
-                        plog(f"{observation['step']} - This should not happend. x: {cell.pos.x}, y: {cell.pos.y}")
+                        priority_log(f"{observation['step']} - This should not happend. x: {cell.pos.x}, y: {cell.pos.y}")
                         # priority_str = f""
                         # for t in priority_build_tiles:
                         #     priority_str += f"{t.pos.x},{t.pos.y}\n"
-                        # plog(f"{observation['step']} - priority list: {priority_str}")
+                        # priority_log(f"{observation['step']} - priority list: {priority_str}")
                         new_tile = find_closest_unused_priority_cell(unit, observation)
                         unit_to_priority_tile_dict[unit.id] = new_tile
                         move_command, move_list = add_move_to_direction(unit,new_tile.pos, move_list)
@@ -285,20 +324,19 @@ def agent(observation, configuration):
                         continue
 
                     else:
-                        plog(f"{player.team} - {observation['step']} - Move to tile x: {cell.pos.x}, y: {cell.pos.y}")
+                        priority_log(f"{player.team} - {observation['step']} - Move to tile x: {cell.pos.x}, y: {cell.pos.y}")
                         move_command, move_list = add_move_to_direction(unit,intened_tile.pos, move_list)
                         actions.append(move_command)
                     continue
                 else:
                     if unit.can_build:
-                        mylog(f'Building city now')
+                        log(f'Building city now')
                         actions.append(unit.build_city())                    
-                    # if unit is a worker and there is no cargo space left, and we have cities, lets return to them
                     elif len(player.cities) > 0:
-                        mylog(f'Cannot build city yet')
+                        log(f'Cannot build city yet')
                         continue
             except Exception as e:
-                mylog(f"{observation['step']}: Unit error {str(e)}")
+                log(f"{observation['step']}: Unit error {str(e)}")
 
     can_create = len(city_tiles) - len(workers)
 
@@ -311,9 +349,9 @@ def agent(observation, configuration):
                 if can_create > 0 and not city_tile.pos in move_list and surrounding_unit_count(city_tile_cell, workers) < 2:
                     actions.append(city_tile.build_worker())
                     can_create -= 1
-                    mylog(f"{observation['step']}: Created a worker ")
+                    log(f"{observation['step']}: Created a worker ")
                 else:
                     actions.append(city_tile.research())
-                    mylog(f"{observation['step']}: Doing research! ")
+                    log(f"{observation['step']}: Doing research! ")
     
     return actions
